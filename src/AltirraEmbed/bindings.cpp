@@ -105,12 +105,11 @@ std::atomic<bool> g_initialized{false};
 IVDVideoDisplay*  g_pNullDisplay = nullptr;
 EmbedAudioTap     g_audioTap;
 
-// Each phase is logged + try/wrapped so a failure surfaces in the JS
-// console as a readable string. Without this, an uncaught C++ exception
-// bubbles up as `{ excPtr: 16597640 }` from Embind with no symbol.
+// Wrap each init step so a failing one surfaces a readable string in the
+// JS console — an uncaught C++ exception otherwise comes through Embind
+// as `{ excPtr: 16597640 }` with no symbol.
 #define EMBED_STEP(label, code)                                            \
     do {                                                                   \
-        emscripten_console_log("[altirra-embed] " label "...");            \
         try { code; }                                                      \
         catch (const MyError& e) {                                         \
             emscripten_console_errorf("[altirra-embed] " label             \
@@ -198,8 +197,6 @@ void EnsureInitialized() {
 
     EMBED_STEP("g_sim.ColdReset",   g_sim.ColdReset());
     EMBED_STEP("g_sim.Resume",      g_sim.Resume());
-
-    emscripten_console_log("[altirra-embed] init complete");
 }
 
 // Embind helper — given an Embind exception pointer, return the C++
@@ -224,7 +221,6 @@ public:
 
     bool loadXEX(val data) {
         const auto len = data["length"].as<unsigned>();
-        emscripten_console_logf("[altirra-embed] loadXEX %u bytes", len);
         mLoaded.assign(len, 0);
         val memView{ typed_memory_view(len, mLoaded.data()) };
         memView.call<void>("set", data);
@@ -232,31 +228,19 @@ public:
         // Wrap bytes in a memory stream so Altirra never touches the
         // filesystem (no sidecar `.lst`/`.lab`/`.lbl`/`.elf` probing,
         // no MEMFS pollution between loads). mOriginalPath stays empty
-        // so the loader treats this as ephemeral.
-        try {
-            VDMemoryStream stream(mLoaded.data(), (uint32)mLoaded.size());
-            ATMediaLoadContext ctx;
-            const VDStringW wname = VDTextU8ToW(VDStringSpanA("loaded.xex"));
-            ctx.mImageName = wname.c_str();
-            ctx.mpStream   = &stream;
-            ctx.mWriteMode = kATMediaWriteMode_RO;
-            const bool ok = g_sim.Load(ctx);
-            emscripten_console_logf("[altirra-embed] sim.Load returned %d", (int)ok);
-            if (!ok) return false;
-            g_sim.ColdReset();
-            g_sim.Resume();
-            emscripten_console_log("[altirra-embed] ColdReset + Resume done");
-            return true;
-        } catch (const MyError& e) {
-            emscripten_console_errorf("[altirra-embed] loadXEX MyError: %s", e.c_str());
-            return false;
-        } catch (const std::exception& e) {
-            emscripten_console_errorf("[altirra-embed] loadXEX std::exception: %s", e.what());
-            return false;
-        } catch (...) {
-            emscripten_console_error("[altirra-embed] loadXEX threw unknown");
-            return false;
-        }
+        // so the loader treats this as ephemeral. Exceptions from
+        // sim.Load (MyError etc.) propagate to JS — `AltirraBackend`
+        // decodes via `getExceptionMessage`.
+        VDMemoryStream stream(mLoaded.data(), (uint32)mLoaded.size());
+        ATMediaLoadContext ctx;
+        const VDStringW wname = VDTextU8ToW(VDStringSpanA("loaded.xex"));
+        ctx.mImageName = wname.c_str();
+        ctx.mpStream   = &stream;
+        ctx.mWriteMode = kATMediaWriteMode_RO;
+        if (!g_sim.Load(ctx)) return false;
+        g_sim.ColdReset();
+        g_sim.Resume();
+        return true;
     }
 
     void setBreakpoints(val addrs) {
@@ -288,8 +272,6 @@ public:
                     info.mAddress, e.c_str());
             }
         }
-        emscripten_console_logf("[altirra-embed] setBreakpoints %u addrs registered=%u",
-            len, (unsigned)mDebugBpIds.size());
     }
 
     int advanceFrame(val /*trapFnLegacy*/) {
@@ -299,32 +281,28 @@ public:
         if (!g_sim.IsRunning()) g_sim.Resume();
         constexpr int kMaxIters = 4 * 35568;
         int iters = 0;
-        bool trapped = false;
         while (iters < kMaxIters) {
             const auto r = g_sim.Advance(false);
             ++iters;
-            // Debugger BP hits halt the simulator → Stopped.
-            if (r == ATSimulator::kAdvanceResult_Stopped) { trapped = true; break; }
+            // Debugger BP hits halt the simulator → Stopped. Do NOT
+            // Resume here — leave the sim halted so the host's next
+            // step() / advanceFrame() can decide what to do. (StepInto
+            // bails out if the sim is already running, which would
+            // turn every Step into a full-frame run.)
+            if (r == ATSimulator::kAdvanceResult_Stopped) break;
             if (ATBridgeNullVideoDisplayConsumeFramePosted(g_pNullDisplay)) break;
         }
-        if (++mAdvanceLogCounter <= 3) {
-            emscripten_console_logf("[altirra-embed] advanceFrame iters=%d trapped=%d PC=$%04x bps=%d",
-                iters, (int)trapped,
-                g_sim.GetCPU().GetPC() & 0xffff, (int)mDebugBpIds.size());
-        }
-        // Do NOT Resume after a BP hit — leave the sim halted so the
-        // host's next step() / advanceFrame() can decide what to do.
-        // (StepInto bails out if the sim is already running, which made
-        // every Step a full-frame run-through instead of a single instr.)
         return iters;
     }
 
     void frameRefresh() {
-        // Snapshot-trick refresh: capture post-advance frame, then
-        // ApplySnapshot to restore sim/CPU state. We log run state at
-        // each transition because earlier attempts had Apply leave the
-        // sim in `running=1` which then bricked the next step (StepInto
-        // bails when sim is already running).
+        // Snapshot → advance one frame → capture pixels → Apply.
+        // Known-broken: Apply leaves the sim in `mbRunning=true` plus
+        // inconsistent debugger linkage, so the next StepInto bails
+        // out early and turns into a full-frame run. Disabled until we
+        // find a way to round-trip debugger state through Apply (or
+        // skip Apply entirely with a direct ANTIC scanline render). The
+        // host currently calls advanceFrame() instead.
         IATDebugger* dbg = ATGetDebugger();
         std::vector<ATDebuggerBreakpointInfo> savedBps;
         if (dbg) {
@@ -334,18 +312,13 @@ public:
                 dbg->ClearUserBreakpoint(id, false);
             }
             mDebugBpIds.clear();
-            dbg->Break();   // flush any pending step condition
+            dbg->Break();
         }
-
-        const uint16_t pcAtSnap = g_sim.GetCPU().GetPC() & 0xffff;
-        const bool runningAtSnap = g_sim.IsRunning();
 
         vdrefptr<IATSerializable> snap;
         vdrefptr<IATSerializable> snapInfo;
-        try {
-            g_sim.CreateSnapshot(~snap, ~snapInfo);
-        } catch (...) {
-            emscripten_console_error("[altirra-embed] frameRefresh: CreateSnapshot threw");
+        try { g_sim.CreateSnapshot(~snap, ~snapInfo); }
+        catch (...) {
             if (dbg) {
                 for (auto& info : savedBps) {
                     try { mDebugBpIds.push_back(dbg->SetBreakpoint(-1, info)); }
@@ -364,20 +337,10 @@ public:
         capturePixels();
         mPixelsCached = true;
 
-        bool applyOk = false;
         if (snap) {
-            try { applyOk = g_sim.ApplySnapshot(*snap, nullptr); }
+            try { g_sim.ApplySnapshot(*snap, nullptr); }
             catch (...) {}
         }
-        const uint16_t pcAfterApply = g_sim.GetCPU().GetPC() & 0xffff;
-        const bool runningAfterApply = g_sim.IsRunning();
-        emscripten_console_logf(
-            "[altirra-embed] frameRefresh: applyOk=%d  PC %04x->%04x  running %d->%d",
-            (int)applyOk, pcAtSnap, pcAfterApply,
-            (int)runningAtSnap, (int)runningAfterApply);
-
-        // Force halted state regardless of what Apply did — host expects
-        // sim paused after frameRefresh (it follows a step()/BP halt).
         if (g_sim.IsRunning()) g_sim.Pause();
 
         if (dbg) {
@@ -396,8 +359,6 @@ public:
         // Advance().
         IATDebugger* dbg = ATGetDebugger();
         if (!dbg) { g_sim.Resume(); return 0; }
-
-        const uint16_t pcBefore = g_sim.GetCPU().GetPC() & 0xffff;
         dbg->StepInto(kATDebugSrcMode_Disasm);
 
         int iters = 0;
@@ -406,10 +367,6 @@ public:
             const auto r = g_sim.Advance(false);
             if (r == ATSimulator::kAdvanceResult_Stopped) break;
         }
-
-        const uint16_t pcAfter = g_sim.GetCPU().GetPC() & 0xffff;
-        emscripten_console_logf("[altirra-embed] step PC %04x -> %04x iters=%d running=%d",
-            pcBefore, pcAfter, iters, (int)g_sim.IsRunning());
         return iters;
     }
 
@@ -434,16 +391,12 @@ public:
     bool isAtInstrBoundary()  const { return g_sim.GetCPU().IsAtInsnStep(); }
 
     val readMem(int addr, int len) {
+        // mMemBuf must be a member, not a stack local — typed_memory_view
+        // aliases the underlying storage and is read by JS after this
+        // function returns.
         mMemBuf.resize(static_cast<size_t>(len));
         for (int i = 0; i < len; ++i) {
             mMemBuf[i] = g_sim.DebugReadByte((uint16)((addr + i) & 0xffff));
-        }
-        if (++mReadMemLogCounter <= 3 && len >= 8) {
-            emscripten_console_logf(
-                "[altirra-embed] readMem addr=$%04x len=%d first8=%02x %02x %02x %02x %02x %02x %02x %02x",
-                addr, len,
-                mMemBuf[0], mMemBuf[1], mMemBuf[2], mMemBuf[3],
-                mMemBuf[4], mMemBuf[5], mMemBuf[6], mMemBuf[7]);
         }
         return val(typed_memory_view(mMemBuf.size(), mMemBuf.data()));
     }
@@ -524,14 +477,7 @@ public:
     bool capturePixels() {
         VDPixmapBuffer srcBuf;
         VDPixmap src;
-        const bool ok = g_sim.GetGTIA().GetLastFrameBuffer(srcBuf, src);
-        if (++mPixelsLogCounter <= 3) {
-            emscripten_console_logf(
-                "[altirra-embed] capturePixels: ok=%d w=%d h=%d pitch=%d format=%d",
-                (int)ok, ok ? src.w : 0, ok ? src.h : 0,
-                ok ? (int)src.pitch : 0, ok ? src.format : 0);
-        }
-        if (!ok) return false;
+        if (!g_sim.GetGTIA().GetLastFrameBuffer(srcBuf, src)) return false;
         if (mXrgbBuf.format == 0
             || mXrgbBuf.w != src.w
             || mXrgbBuf.h != src.h) {
@@ -583,9 +529,6 @@ private:
     std::vector<float>         mAudioOut;
     std::vector<uint32_t>      mDebugBpIds;
     VDPixmapBuffer             mXrgbBuf;
-    int mPixelsLogCounter = 0;
-    int mAdvanceLogCounter = 0;
-    int mReadMemLogCounter = 0;
     bool mPixelsCached = false;
     mutable uint16_t mLastStablePC = 0;
 };
