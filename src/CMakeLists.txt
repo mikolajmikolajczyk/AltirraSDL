@@ -34,3 +34,14 @@ endif()
 if(ALTIRRA_BRIDGE_SERVER AND ALTIRRA_SDL3 AND NOT ANDROID)
     add_subdirectory(AltirraBridgeServer)
 endif()
+
+# Headless embeddable Altirra core for the web — same emulation core as
+# AltirraBridgeServer, but exposes its API via Embind (class_<AltirraCore>)
+# instead of a TCP bridge protocol. Intended for embedding in JS hosts
+# (madside IDE). Builds for wasm and natively (for smoke testing).
+#
+# Default OFF — opt in with -DALTIRRA_EMBED=ON. Skipped on Android.
+option(ALTIRRA_EMBED "Build the headless AltirraEmbed wasm core for JS embedding" OFF)
+if(ALTIRRA_EMBED AND ALTIRRA_SDL3 AND NOT ANDROID)
+    add_subdirectory(AltirraEmbed)
+endif()

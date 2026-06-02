@@ -70,3 +70,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
+
+# madside-embed branch additions
+.emcache/
+build/wasm-embed/
