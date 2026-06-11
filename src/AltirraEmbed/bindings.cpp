@@ -219,7 +219,12 @@ public:
         g_sim.ColdReset();
     }
 
-    bool loadXEX(val data) {
+    bool loadXEX(val data) { return loadMedia("loaded.xex", data); }
+    bool loadATR(val data) { return loadMedia("loaded.atr", data); }
+    bool loadCAR(val data) { return loadMedia("loaded.car", data); }
+    bool loadCAS(val data) { return loadMedia("loaded.cas", data); }
+
+    bool loadMedia(const char* filename, val data) {
         const auto len = data["length"].as<unsigned>();
         mLoaded.assign(len, 0);
         val memView{ typed_memory_view(len, mLoaded.data()) };
@@ -227,13 +232,16 @@ public:
 
         // Wrap bytes in a memory stream so Altirra never touches the
         // filesystem (no sidecar `.lst`/`.lab`/`.lbl`/`.elf` probing,
-        // no MEMFS pollution between loads). mOriginalPath stays empty
-        // so the loader treats this as ephemeral. Exceptions from
-        // sim.Load (MyError etc.) propagate to JS — `AltirraBackend`
-        // decodes via `getExceptionMessage`.
+        // no MEMFS pollution between loads). Altirra's generic media
+        // loader autodetects format from the filename hint + content
+        // magic: .xex executable, .atr disk image, .car cartridge,
+        // .cas cassette. mOriginalPath stays empty so the loader
+        // treats this as ephemeral. Exceptions from sim.Load (MyError
+        // etc.) propagate to JS — `AltirraBackend` decodes via
+        // `getExceptionMessage`.
         VDMemoryStream stream(mLoaded.data(), (uint32)mLoaded.size());
         ATMediaLoadContext ctx;
-        const VDStringW wname = VDTextU8ToW(VDStringSpanA("loaded.xex"));
+        const VDStringW wname = VDTextU8ToW(VDStringSpanA(filename));
         ctx.mImageName = wname.c_str();
         ctx.mpStream   = &stream;
         ctx.mWriteMode = kATMediaWriteMode_RO;
@@ -541,6 +549,9 @@ EMSCRIPTEN_BINDINGS(altirra_core) {
         .constructor<>()
         .function("reset",             &AltirraCore::reset)
         .function("loadXEX",           &AltirraCore::loadXEX)
+        .function("loadATR",           &AltirraCore::loadATR)
+        .function("loadCAR",           &AltirraCore::loadCAR)
+        .function("loadCAS",           &AltirraCore::loadCAS)
         .function("advanceFrame",      &AltirraCore::advanceFrame)
         .function("setBreakpoints",    &AltirraCore::setBreakpoints)
         .function("step",              &AltirraCore::step)
