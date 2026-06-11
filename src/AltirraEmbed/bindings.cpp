@@ -219,6 +219,19 @@ public:
         g_sim.ColdReset();
     }
 
+    void setHardwareMode(unsigned mode) {
+        g_sim.SetHardwareMode((ATHardwareMode)mode);
+    }
+    void setMemoryMode(unsigned mode) {
+        g_sim.SetMemoryMode((ATMemoryMode)mode);
+    }
+    void setBasic(bool enabled) {
+        g_sim.SetBasic(enabled);
+    }
+    void setKernel(int firmwareId) {
+        g_sim.SetKernel((uint64)firmwareId);
+    }
+
     bool loadXEX(val data) { return loadMedia("loaded.xex", data); }
     bool loadATR(val data) { return loadMedia("loaded.atr", data); }
     bool loadCAR(val data) { return loadMedia("loaded.car", data); }
@@ -552,6 +565,10 @@ EMSCRIPTEN_BINDINGS(altirra_core) {
         .function("loadATR",           &AltirraCore::loadATR)
         .function("loadCAR",           &AltirraCore::loadCAR)
         .function("loadCAS",           &AltirraCore::loadCAS)
+        .function("setHardwareMode",   &AltirraCore::setHardwareMode)
+        .function("setMemoryMode",     &AltirraCore::setMemoryMode)
+        .function("setBasic",          &AltirraCore::setBasic)
+        .function("setKernel",         &AltirraCore::setKernel)
         .function("advanceFrame",      &AltirraCore::advanceFrame)
         .function("setBreakpoints",    &AltirraCore::setBreakpoints)
         .function("step",              &AltirraCore::step)
