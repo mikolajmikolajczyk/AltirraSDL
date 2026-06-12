@@ -18,7 +18,11 @@ set(ALTIRRA_BRIDGE_SERVER_DIR ${CMAKE_SOURCE_DIR}/src/AltirraBridgeServer)
 
 add_executable(AltirraEmbed
     main_embed.cpp
-    bindings.cpp
+    # Embind API surface (TU split — see cd90f9d):
+    bindings.cpp        # AltirraCore runtime methods + EMSCRIPTEN_BINDINGS
+    embed_init.cpp      # EnsureInitialized + EMBED_STEP + globals
+    audio_tap.cpp       # EmbedAudioTap
+    bp_step.cpp         # setBreakpoints / step / advanceFrame / frameRefresh
 
     # Reuse the bridge server's UI-no-op stubs verbatim — they provide
     # ATBridgeNullVideoDisplay (used as GTIA's video sink) plus no-op
