@@ -148,29 +148,29 @@ static void ATClearMRU() {
 // =========================================================================
 
 static void BootImageCallback(void *, const char * const *filelist, int) {
-	if (!filelist || !filelist[0]) return;
+	if (!filelist || !filelist[0] || !*filelist[0]) return;
 	ATUIPushDeferred(kATDeferred_BootImage, filelist[0]);
 }
 
 static void OpenImageCallback(void *, const char * const *filelist, int) {
-	if (!filelist || !filelist[0]) return;
+	if (!filelist || !filelist[0] || !*filelist[0]) return;
 	ATUIPushDeferred(kATDeferred_OpenImage, filelist[0]);
 }
 
 static void CartridgeAttachCallback(void *, const char * const *filelist, int) {
-	if (!filelist || !filelist[0]) return;
+	if (!filelist || !filelist[0] || !*filelist[0]) return;
 	ATUIPushDeferred(kATDeferred_AttachCartridge, filelist[0]);
 }
 
 // Per-drive attach callback — drive index in userdata
 static void AttachDiskCallback(void *userdata, const char * const *filelist, int) {
 	int driveIdx = (int)(intptr_t)userdata;
-	if (!filelist || !filelist[0] || driveIdx < 0 || driveIdx >= 15) return;
+	if (!filelist || !filelist[0] || !*filelist[0] || driveIdx < 0 || driveIdx >= 15) return;
 	ATUIPushDeferred(kATDeferred_AttachDisk, filelist[0], driveIdx);
 }
 
 static void CassetteSaveCallback(void *, const char * const *filelist, int) {
-	if (!filelist || !filelist[0]) return;
+	if (!filelist || !filelist[0] || !*filelist[0]) return;
 	ATUIPushDeferred(kATDeferred_SaveCassette, filelist[0]);
 }
 
@@ -517,6 +517,10 @@ static void RenderFileMenu(ATSimulator &sim, ATUIState &state, SDL_Window *windo
 			sim.RotateDrives(8, 1);
 		if (ImGui::MenuItem("Rotate Up"))
 			sim.RotateDrives(8, -1);
+		// Extension over Windows Altirra (approved): swap the disks
+		// mounted in drive 1 (index 0) and drive 2 (index 1).
+		if (ImGui::MenuItem("Swap Disks"))
+			sim.SwapDrives(0, 1);
 
 		ImGui::Separator();
 

@@ -79,6 +79,7 @@ target_sources(AltirraSDL PRIVATE
     source/ui/core/ui_main_compat.cpp
     source/ui/core/ui_main_overlays.cpp
     source/ui/core/ui_confirm_dialog.cpp
+    source/ui/core/ui_command_icons.cpp
     source/ui/core/ui_indicators.cpp
     source/ui/core/ui_fonts.cpp
     source/ui/core/ui_autosuggest.cpp
@@ -311,6 +312,12 @@ if(ALTIRRA_BRIDGE)
         source/bridge/bridge_commands_render.cpp
         source/bridge/bridge_commands_debug.cpp
         source/bridge/bridge_commands_debug2.cpp
+        # Audio capture (AUDIO_RECORD): GUI target only — links ATAudioWriter
+        # via ui_recording.cpp. The headless AltirraBridgeServer target builds
+        # audio with -DALTIRRA_AUDIO_NULL and does NOT link ATAudioWriter, so
+        # it must not compile this file; the dispatch + forward-decl in
+        # bridge_server.cpp are guarded by ALTIRRA_BRIDGE_AUDIO_REC.
+        source/bridge/bridge_commands_audio.cpp
         source/bridge/bridge_bare_stub.cpp
         source/bridge/bridge_savestate.cpp
         # Per-target glue: SDL3 routes BOOT/MOUNT/STATE_* through
@@ -318,7 +325,24 @@ if(ALTIRRA_BRIDGE)
         # target provides its own implementation of these symbols.
         source/bridge/bridge_main_glue_sdl3.cpp
     )
-    target_compile_definitions(AltirraSDL PRIVATE ALTIRRA_BRIDGE_ENABLED=1)
+    target_compile_definitions(AltirraSDL PRIVATE ALTIRRA_BRIDGE_ENABLED=1 ALTIRRA_BRIDGE_AUDIO_REC=1)
+endif()
+
+# ---------------------------------------------------------------------------
+# 65C816 CPU conformance harness (Tom Harte SingleStepTests) — OFF by default.
+#
+# When ON, compiles cputest_runner.cpp and enables the --cpu-test* CLI flags
+# in main_sdl3.cpp (guarded by ALTIRRA_CPU_TESTS_ENABLED).  This is developer
+# build-time tooling; the shipped binary is built with it OFF so it carries
+# none of the harness code and none of the --cpu-test flags.
+#   cmake -DALTIRRA_CPU_TESTS=ON ...
+# ---------------------------------------------------------------------------
+option(ALTIRRA_CPU_TESTS "Build the 65C816 --cpu-test conformance harness" OFF)
+if(ALTIRRA_CPU_TESTS)
+    target_sources(AltirraSDL PRIVATE
+        source/app/cputest_runner.cpp
+    )
+    target_compile_definitions(AltirraSDL PRIVATE ALTIRRA_CPU_TESTS_ENABLED=1)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -696,6 +720,28 @@ add_custom_command(
 target_sources(AltirraSDL PRIVATE ${EMOTES_GEN_C})
 
 # ---------------------------------------------------------------------------
+# Windows command icon atlas used by the desktop quick bar
+# ---------------------------------------------------------------------------
+set(COMMAND_ICONS_ASSET ${CMAKE_CURRENT_SOURCE_DIR}/assets/command-icons/command-icons.png)
+set(COMMAND_ICONS_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+set(COMMAND_ICONS_GEN_H ${COMMAND_ICONS_GEN_DIR}/command_icons_data.h)
+set(COMMAND_ICONS_GEN_C ${COMMAND_ICONS_GEN_DIR}/command_icons_data.cpp)
+set(COMMAND_ICONS_BAKE_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/tools/bake_command_icons.py)
+
+add_custom_command(
+    OUTPUT ${COMMAND_ICONS_GEN_H} ${COMMAND_ICONS_GEN_C}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${COMMAND_ICONS_GEN_DIR}
+    COMMAND ${Python3_EXECUTABLE} ${COMMAND_ICONS_BAKE_SCRIPT}
+            ${COMMAND_ICONS_GEN_DIR}
+            ${COMMAND_ICONS_ASSET}
+    DEPENDS ${COMMAND_ICONS_BAKE_SCRIPT} ${COMMAND_ICONS_ASSET}
+    COMMENT "Baking command icon atlas -> C++"
+    VERBATIM
+)
+
+target_sources(AltirraSDL PRIVATE ${COMMAND_ICONS_GEN_C})
+
+# ---------------------------------------------------------------------------
 # Help content (Altirra .chm XML sources -> embedded binary blob)
 # ---------------------------------------------------------------------------
 # The Windows build ships an HTML Help .chm built from src/ATHelpFile/source.
@@ -898,7 +944,7 @@ elseif(ALTIRRA_WASM)
         "SHELL:-sINITIAL_MEMORY=128MB"
         "SHELL:-sSTACK_SIZE=1MB"
         "SHELL:-sEXPORTED_RUNTIME_METHODS=['FS','IDBFS','ccall','cwrap','stringToUTF8','UTF8ToString','lengthBytesUTF8','getExceptionMessage','incrementExceptionRefcount','decrementExceptionRefcount']"
-        "SHELL:-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_ATWasmOnFileUploaded','_ATWasmSyncFSOut','_ATWasmOnFilePicked','_ATWasmRescanFirmware','_ATWasmUnpackArchive','_ATWasmDeleteTree','_ATWasmCopyTree','_ATWasmFirstRunBootstrap','_ATWasmGetFirstRunState','_ATWasmGetFirstRunFiles','_ATWasmResetFirstRun','_ATWasmSetFirstRunPrimaryUrl','_ATWasmRegisterGamePackSource','_ATWasmIsPaused','_ATWasmTogglePause','_ATWasmAutoHostNetplay','_ATWasmConsoleSwitch','_ATWasmColdReset','_ATWasmGetVideoStandard','_ATWasmToggleVideoStandard','_ATWasmGetCRTMode','_ATWasmToggleCRT','_ATWasmGetVirtualKeyboard','_ATWasmToggleVirtualKeyboard','_ATWasmSetCRTEnabled','_ATWasmSetVirtualKeyboard','_ATWasmSetDisplayFilter','_ATWasmSetArtifactMode','_ATWasmSetStretchMode','_ATWasmOpenMenu','_ATWasmSetGamingMode','_ATWasmIsGamingMode','_ATWasmGetTouchControls','_ATWasmSetTouchControls','_ATWasmSetBrokerActive','_ATWasmAdoptBrokerSession','_ATWasmSetStartingOverlay','_ATWasmBrokerSessionEnded']"
+        "SHELL:-sEXPORTED_FUNCTIONS=['_main','_malloc','_free','_ATWasmOnFileUploaded','_ATWasmSyncFSOut','_ATWasmOnFilePicked','_ATWasmRescanFirmware','_ATWasmUnpackArchive','_ATWasmDeleteTree','_ATWasmCopyTree','_ATWasmFirstRunBootstrap','_ATWasmGetFirstRunState','_ATWasmGetFirstRunFiles','_ATWasmResetFirstRun','_ATWasmSetFirstRunPrimaryUrl','_ATWasmRegisterGamePackSource','_ATWasmIsPaused','_ATWasmTogglePause','_ATWasmAutoHostNetplay','_ATWasmConsoleSwitch','_ATWasmColdReset','_ATWasmGetVideoStandard','_ATWasmToggleVideoStandard','_ATWasmGetCRTMode','_ATWasmToggleCRT','_ATWasmGetVirtualKeyboard','_ATWasmToggleVirtualKeyboard','_ATWasmSetCRTEnabled','_ATWasmSetVirtualKeyboard','_ATWasmSetDisplayFilter','_ATWasmSetArtifactMode','_ATWasmSetStretchMode','_ATWasmOpenMenu','_ATWasmSetGamingMode','_ATWasmIsGamingMode','_ATWasmGetTouchControls','_ATWasmSetTouchControls','_ATWasmSyncCanvasSize','_ATWasmSetBrokerActive','_ATWasmAdoptBrokerSession','_ATWasmSetStartingOverlay','_ATWasmBrokerSessionEnded']"
         "SHELL:-lidbfs.js"
         "SHELL:-sENVIRONMENT=web"
         "SHELL:-sASYNCIFY=0"

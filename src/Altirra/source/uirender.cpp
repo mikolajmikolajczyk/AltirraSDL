@@ -38,10 +38,13 @@
 #include <at/atui/uicontainer.h>
 #include <at/atui/uimanager.h>
 #include <at/atui/uiwidget.h>
+#include <at/atui/uiwidgetanimator.h>
 #include <at/atuicontrols/uibutton.h>
 #include <at/atuicontrols/uiimage.h>
 #include <at/atuicontrols/uilabel.h>
+#include "uicommandicons.h"
 #include "uikeyboard.h"
+#include "uiquickbar.h"
 #include "settings.h"
 
 namespace {
@@ -166,7 +169,7 @@ void ATUIOverlayCustomization::AddCustomizableWidget(const char *tag, ATUIWidget
 	cwi.mpWidget = w;
 	cwi.mpTag = tag;
 	cwi.mpLabel = label;
-	
+
 	if (w) {
 		cwi.mDefaultAnchors = w->GetAnchors();
 		cwi.mDefaultOffset = w->GetOffset();
@@ -1689,7 +1692,157 @@ void ATUIAudioScope::UpdateSampleCounts(int i) {
 		mpAudioMonitors[i]->SetMixedSampleCount(n);
 }
 
-///////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+class ATUIAutoHideContainer final : public ATUIContainer {
+public:
+	static constexpr auto kTypeID = "ATUIAutoHideContainer"_vdtypeid;
+
+	void SetTargetAnimator(ATUIWidgetOffsetAnimator *target);
+
+	void SetOnShow(vdfunction<void()> fn);
+
+	void LockOpen(bool lock);
+
+	void OnCreate() override;
+	void OnDestroy() override;
+	void OnSize() override;
+	void OnTrackCursorChanges(ATUIWidget *w) override;
+
+private:
+	void UpdateAnimatorOffsets();
+
+	void SetContainsCursor(bool contained);
+	void UpdateHideState();
+
+	vdrefptr<ATUIWidgetOffsetAnimator> mpAutoHideAnimator;
+	ATUITimerHandle mHideTimer {};
+
+	bool mbContainsCursor = false;
+	bool mbLockedOpen = false;
+	bool mbHide = true;
+
+	vdfunction<void()> mpOnShow;
+};
+
+void ATUIAutoHideContainer::SetTargetAnimator(ATUIWidgetOffsetAnimator *target) {
+	mpAutoHideAnimator = target;
+
+	UpdateAnimatorOffsets();
+}
+
+void ATUIAutoHideContainer::SetOnShow(vdfunction<void()> fn) {
+	mpOnShow = std::move(fn);
+}
+
+void ATUIAutoHideContainer::LockOpen(bool lock) {
+	if (mbLockedOpen != lock) {
+		mbLockedOpen = lock;
+
+		UpdateHideState();
+	}
+}
+
+void ATUIAutoHideContainer::OnCreate() {
+	ATUIContainer::OnCreate();
+
+	mpManager->AddTrackingWindow(this);
+}
+
+void ATUIAutoHideContainer::OnDestroy() {
+	mpManager->RemoveTrackingWindow(this);
+
+	ATUIContainer::OnDestroy();
+}
+
+void ATUIAutoHideContainer::OnSize() {
+	ATUIContainer::OnSize();
+
+	UpdateAnimatorOffsets();
+}
+
+void ATUIAutoHideContainer::OnTrackCursorChanges(ATUIWidget *w) {
+	SetContainsCursor(w != nullptr);
+}
+
+void ATUIAutoHideContainer::UpdateAnimatorOffsets() {
+	if (mpAutoHideAnimator) {
+		mpAutoHideAnimator->SetEndpoints(
+			vdfloat2 { 0.0f, 0.0f },
+			vdfloat2 { 0.0f, (float)GetClientArea().height() }
+		);
+	}
+}
+
+void ATUIAutoHideContainer::SetContainsCursor(bool contained) {
+	if (mbContainsCursor != contained) {
+		mbContainsCursor = contained;
+
+		UpdateHideState();
+	}
+}
+
+void ATUIAutoHideContainer::UpdateHideState() {
+	const bool shouldHide = !mbContainsCursor && !mbLockedOpen;
+
+	if (mbHide != shouldHide) {
+		mbHide = shouldHide;
+
+		if (shouldHide) {
+			mHideTimer = StartTimer(0.2f, 0.0f,
+				[this] {
+					if (mpAutoHideAnimator) {
+						mpAutoHideAnimator->SetForward(true);
+						mpAutoHideAnimator->SetRate(2.0f);
+						mpAutoHideAnimator->Start();
+					}
+				}
+			);
+		} else {
+			StopTimer(mHideTimer);
+			mHideTimer = {};
+
+			if (mpAutoHideAnimator) {
+				mpAutoHideAnimator->SetForward(false);
+				mpAutoHideAnimator->SetRate(4.0f);
+				mpAutoHideAnimator->Start();
+			}
+
+			if (mpOnShow)
+				mpOnShow();
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+class ATUIDefinedHeightContainer final : public ATUIContainer {
+public:
+	void SetDesiredHeight(sint32 h);
+
+	ATUIWidgetMetrics OnMeasure() override;
+
+private:
+	sint32 mDesiredHeight = 0;
+};
+
+void ATUIDefinedHeightContainer::SetDesiredHeight(sint32 h) {
+	if (mDesiredHeight != h) {
+		mDesiredHeight = h;
+
+		InvalidateMeasure();
+	}
+}
+
+ATUIWidgetMetrics ATUIDefinedHeightContainer::OnMeasure() {
+	ATUIWidgetMetrics m;
+	m.mDesiredSize.h = mDesiredHeight;
+
+	return m;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 class ATUIRenderer final : public vdrefcount, public IATUIRenderer, public IVDTimerCallback {
 public:
 	ATUIRenderer();
@@ -1770,6 +1923,8 @@ public:
 
 	void AddIndicatorSafeHeightChangedHandler(const vdfunction<void()> *pfn) override;
 	void RemoveIndicatorSafeHeightChangedHandler(const vdfunction<void()> *pfn) override;
+
+	void SetQuickBarEnabled(bool enabled) override;
 
 	void BeginCustomization() override;
 
@@ -1859,7 +2014,11 @@ protected:
 	int		mLEDFontCellAscent = 0;
 	vdrefptr<IVDDisplayFont> mpLEDFont;
 
+	bool	mbQuickBarEnabled = false;
+
 	vdrefptr<ATUIContainer> mpContainer;
+	vdrefptr<ATUIAutoHideContainer> mpQuickBarContainer;
+	vdrefptr<ATUIQuickBarWidget> mpQuickBar;
 	vdrefptr<ATUILabel> mpDiskDriveIndicatorLabels[15];
 	vdrefptr<ATUILabel> mpFpsLabel;
 	vdrefptr<ATUILabel> mpStatusMessageLabel;
@@ -1938,9 +2097,156 @@ ATUIRenderer::ATUIRenderer() {
 	mpContainer->SetSizeOffset(vdsize32(0, 0));
 	mpContainer->SetHitTransparent(true);
 
+	vdrefptr<ATUIWidgetOffsetAnimator> autoHideAnim(new ATUIWidgetOffsetAnimator);
+
+	mpQuickBar = new ATUIQuickBarWidget;
+	mpQuickBar->SetAutoSize();
+	mpQuickBar->AddAnimator(*autoHideAnim);
+
+	mpQuickBarContainer = new ATUIAutoHideContainer;
+	mpQuickBarContainer->SetVisible(mbQuickBarEnabled);
+	mpQuickBarContainer->SetDockMode(kATUIDockMode_None);
+	mpQuickBarContainer->SetPlacement(vdrect32f(1, 1, 1, 1), vdpoint32(0, 0), vdfloat2(1, 1));
+	mpQuickBarContainer->SetAutoSize();
+	mpQuickBarContainer->SetTargetAnimator(autoHideAnim);
+	mpQuickBarContainer->SetOnShow(
+		[this] {
+			if (mpQuickBar && mpQuickBar->GetManager())
+				mpQuickBar->ForceRefresh();
+		}
+	);
+
+	mpQuickBar->SetOnSubMenuChange(
+		[this](bool open) {
+			if (mpQuickBarContainer && mpQuickBarContainer->GetManager())
+				mpQuickBarContainer->LockOpen(open);
+		}
+	);
+
+	autoHideAnim->SetProgress(1.0f);
+
+	VDPixmapBuffer iconBuffer;
+
+	ATUILoadCommandIcon("submenu", iconBuffer);
+	mpQuickBar->SetSubmenuOverlay(iconBuffer);
+
+	ATUILoadCommandIcon("configure", iconBuffer);
+	mpQuickBar->AddCommand("System.Configure", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	mpQuickBar->BeginSubMenu();
+
+	ATUILoadCommandIcon("artifacting_off", iconBuffer);
+	mpQuickBar->AddCommand("Video.ArtifactingNone", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("artifacting_lo", iconBuffer);
+	mpQuickBar->AddCommand("Video.ArtifactingAuto", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("artifacting_hi", iconBuffer);
+	mpQuickBar->AddCommand("Video.ArtifactingAutoHi", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(3);
+
+	ATUILoadCommandIcon("view_blend", iconBuffer);
+	mpQuickBar->AddCommand("Video.ToggleFrameBlending", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+	ATUILoadCommandIcon("view_scanlines", iconBuffer);
+	mpQuickBar->AddCommand("Video.ToggleScanlines", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("overscan_os", iconBuffer);
+	mpQuickBar->AddCommand("View.OverscanOSScreen", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("overscan_normal", iconBuffer);
+	mpQuickBar->AddCommand("View.OverscanNormal", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("overscan_wide", iconBuffer);
+	mpQuickBar->AddCommand("View.OverscanWidescreen", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("overscan_ext", iconBuffer);
+	mpQuickBar->AddCommand("View.OverscanExtended", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("overscan_full", iconBuffer);
+	mpQuickBar->AddCommand("View.OverscanFull", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(5);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("view_fullscreen", iconBuffer);
+	mpQuickBar->AddCommand("View.ToggleFullScreen", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("view", iconBuffer);
+	mpQuickBar->EndSubMenu(nullptr, &iconBuffer);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("image_boot", iconBuffer);
+	mpQuickBar->AddCommand("File.BootImage", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("image_open", iconBuffer);
+	mpQuickBar->AddCommand("File.OpenImage", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("speed_normal", iconBuffer);
+	mpQuickBar->AddCommand("System.ToggleWarpSpeed-", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("speed_warp", iconBuffer);
+	mpQuickBar->AddCommand("System.ToggleWarpSpeed+", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(2);
+
+	ATUILoadCommandIcon("speed_pause", iconBuffer);
+	mpQuickBar->AddCommand("System.TogglePause", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("speed_slow", iconBuffer);
+	mpQuickBar->AddCommand("System.ToggleSlowMotion", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("cold_reset", iconBuffer);
+	mpQuickBar->AddCommand("System.ColdReset", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("warm_reset", iconBuffer);
+	mpQuickBar->AddCommand("System.WarmReset", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("controller_none", iconBuffer);
+	mpQuickBar->AddCommand("Input.SelectQuickMapNone", nullptr, &iconBuffer);
+
+	ATUILoadCommandIcon("controller_joystick", iconBuffer);
+	mpQuickBar->AddCommand("Input.SelectQuickMapJoystick", nullptr, &iconBuffer);
+
+	ATUILoadCommandIcon("controller_paddles", iconBuffer);
+	mpQuickBar->AddCommand("Input.SelectQuickMapPaddle", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(3);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("sio_c_patch", iconBuffer);
+	mpQuickBar->AddCommand("Cassette.ToggleSIOPatch", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("sio_d_patch", iconBuffer);
+	mpQuickBar->AddCommand("Disk.ToggleSIOPatch", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	mpQuickBar->AddSeparator();
+
+	ATUILoadCommandIcon("basic", iconBuffer);
+	mpQuickBar->AddCommand("System.ToggleBASIC", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(1);
+
+	ATUILoadCommandIcon("60hz", iconBuffer);
+	mpQuickBar->AddCommand("Video.StandardNTSC", nullptr, &iconBuffer);
+	ATUILoadCommandIcon("50hz", iconBuffer);
+	mpQuickBar->AddCommand("Video.StandardPAL", nullptr, &iconBuffer);
+	mpQuickBar->AddItem(2);
+
+	mpQuickBar->FinalizeItems();
+
 	for(int i=0; i<15; ++i) {
 		ATUILabel *label = new ATUILabel;
-		
+
 		mpDiskDriveIndicatorLabels[i] = label;
 
 		label->SetTextColor(0);
@@ -1950,7 +2256,7 @@ ATUIRenderer::ATUIRenderer() {
 
 	for(int i=0; i<8; ++i) {
 		ATUILabel *label = new ATUILabel;
-		
+
 		mpWatchLabels[i] = label;
 
 		label->SetFillColor(0);
@@ -2001,7 +2307,7 @@ ATUIRenderer::ATUIRenderer() {
 
 	for(int i=0; i<2; ++i) {
 		ATUILabel *label = new ATUILabel;
-		
+
 		mpLedLabels[i] = label;
 
 		label->SetVisible(false);
@@ -2514,7 +2820,7 @@ void ATUIRenderer::SetAudioDisplayEnabled(bool secondary, bool enable) {
 
 			if (!secondary)
 				disp->SetSlightSID(mpSlightSID);
-			
+
 			disp->SetAudioMonitor(mpAudioMonitors[secondary]);
 
 			mpOverlayCustomization->BindCustomizableWidget(secondary ? kTagAudioDisplay2 : kTagAudioDisplay, disp);
@@ -2733,6 +3039,10 @@ void ATUIRenderer::SetUIManager(ATUIManager *m) {
 		}
 
 		mpFpsLabel->SetFont(mpSysFont);
+
+		c->AddChild(mpQuickBarContainer);
+		mpQuickBarContainer->AddChild(mpQuickBar);
+
 		mpAudioStatusDisplay->SetFont(mpSysFont);
 		mpAudioStatusDisplay->AutoSize();
 
@@ -2851,7 +3161,7 @@ void ATUIRenderer::Update() {
 			} else {
 				label.SetTextF(L"%u", mStatusCounter[i]);
 			}
-			
+
 			label.SetPlacement(vdrect32f(1, 1, 1, 1), vdpoint32(x, 0), vdfloat2{1, 1});
 			const auto& m = label.Measure();
 			x -= m.mDesiredSize.w;
@@ -2984,6 +3294,13 @@ void ATUIRenderer::RemoveIndicatorSafeHeightChangedHandler(const vdfunction<void
 	mIndicatorSafeAreaListeners.Remove(pfn);
 }
 
+void ATUIRenderer::SetQuickBarEnabled(bool enabled) {
+	mbQuickBarEnabled = enabled;
+
+	if (mpQuickBarContainer)
+		mpQuickBarContainer->SetVisible(enabled);
+}
+
 void ATUIRenderer::BeginCustomization() {
 	mpOverlayCustomization->SetVisible(true);
 	mpOverlayCustomization->Focus();
@@ -3043,7 +3360,7 @@ void ATUIRenderer::RelayoutStatic() {
 		x -= label.Measure().mDesiredSize.w;
 		label.SetPlacement(kAnchorBR, vdpoint32(x, ystats2), vdfloat2{0, 1});
 	}
-	
+
 	mpPendingHeldKeyLabel->SetPlacement(kAnchorBR, vdpoint32(0, ystats3), vdfloat2{1,1});
 
 	mpAudioStatusDisplay->SetPlacement(kAnchorTL, vdpoint32(16, 16), vdfloat2{0, 0});
@@ -3077,7 +3394,7 @@ void ATUIRenderer::UpdatePendingHoldLabel() {
 
 		if (mPendingHeldKey >= 0) {
 			const wchar_t *label = ATUIGetNameForKeyCode((uint8)mPendingHeldKey);
-			
+
 			if (label)
 				s += label;
 			else
@@ -3210,7 +3527,7 @@ void ATUIRenderer::RemakeLEDFont() {
 	VDDisplayRendererSoft rs;
 	rs.Init();
 	rs.Begin(tempBuf);
-	
+
 	const int stemWidth = std::min<int>(tw, th) / 10;
 	const int endOffset = tw / 16;
 	const int gridX1 = pad + tw / 6;

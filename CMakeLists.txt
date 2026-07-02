@@ -79,10 +79,49 @@ endfunction()
 # never produces a native Win32 frontend.
 ###############################################################################
 
+# MSVC's Visual Studio generator leaves CMAKE_SYSTEM_PROCESSOR at the host
+# value (e.g. AMD64) even when targeting ARM64 via "-A ARM64".  That makes the
+# per-architecture SIMD source selection in the subprojects pick x86 sources
+# for an ARM64 target.  Normalize CMAKE_SYSTEM_PROCESSOR from the compiler's
+# actual target architecture so every "MATCHES" arch check downstream is
+# correct.  Non-MSVC builds already report the target architecture correctly.
+if(MSVC AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID)
+    if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
+        set(CMAKE_SYSTEM_PROCESSOR "ARM64")
+    elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "ARM")
+        set(CMAKE_SYSTEM_PROCESSOR "ARM")
+    elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "x64")
+        set(CMAKE_SYSTEM_PROCESSOR "AMD64")
+    elseif(CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "X86")
+        set(CMAKE_SYSTEM_PROCESSOR "X86")
+    endif()
+endif()
+
 # ALTIRRA_SDL3 — build the SDL3+ImGui frontend.
 # Always ON: CMake exclusively builds the SDL3+ImGui frontend.
 # The native Win32 UI is built via the Visual Studio .sln, never via CMake.
 option(ALTIRRA_SDL3 "Build SDL3+ImGui frontend" ON)
+
+# ALTIRRA_LIBRETRO — build the RetroArch/libretro shared-library core.
+# This is an opt-in adapter target, separate from AltirraSDL and the
+# BridgeServer executable.
+option(ALTIRRA_LIBRETRO "Build Altirra as a libretro core" OFF)
+
+# Standalone libretro builds use adapter-owned replacements for the few system
+# services that otherwise pull SDL3, while still linking the full emulator
+# graph.
+option(ALTIRRA_LIBRETRO_NO_SDL3 "Build standalone libretro target without fetching/linking SDL3" OFF)
+
+if(ALTIRRA_LIBRETRO_NO_SDL3)
+    add_compile_definitions(ALTIRRA_LIBRETRO_NO_SDL3=1)
+endif()
+
+if(ALTIRRA_LIBRETRO)
+    # The libretro core is a shared library that embeds the static Altirra
+    # emulation libraries. Build those static libraries as PIC only for this
+    # opt-in target; normal AltirraSDL/Bridge builds keep their existing flags.
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # ALTIRRA_FETCH_SDL3 — force-fetch SDL3 from source instead of looking
 # for a system install.  Use this when find_package(SDL3) picks up a
@@ -117,7 +156,7 @@ endif()
 # Static-linking implies FetchContent — system SDL3 typically ships only
 # the shared library, so we can't honour a request for static with
 # find_package.
-if(ALTIRRA_STATIC_SDL3 AND NOT ALTIRRA_FETCH_SDL3)
+if(ALTIRRA_SDL3 AND ALTIRRA_STATIC_SDL3 AND NOT ALTIRRA_FETCH_SDL3)
     message(STATUS "ALTIRRA_STATIC_SDL3=ON implies ALTIRRA_FETCH_SDL3=ON")
     set(ALTIRRA_FETCH_SDL3 ON CACHE BOOL "" FORCE)
 endif()
@@ -282,7 +321,7 @@ endif()
 
 # SDL3 — required when the SDL3 frontend is enabled, or on non-Windows where
 # the system libraries use SDL3 for threading/timing.
-if(ALTIRRA_SDL3 OR NOT WIN32)
+if(ALTIRRA_SDL3 OR (NOT WIN32 AND NOT ALTIRRA_LIBRETRO_NO_SDL3))
     if(ANDROID)
         # On Android, SDL3 must be built from source alongside the project.
         # The android/setup_sdl3.sh script clones SDL3 into android/SDL3/.
@@ -790,6 +829,13 @@ static inline void *_librashader_dlopen_macos(void) {
     else()
         target_compile_options(imgui PRIVATE -w)
     endif()
+endif()
+
+if(ALTIRRA_LIBRETRO_NO_SDL3 AND NOT TARGET SDL3::SDL3)
+    # Standalone libretro builds provide adapter-owned replacements for the
+    # system symbols that otherwise require SDL3. Keep downstream CMake logic
+    # unchanged by satisfying the SDL3 target name with an empty import.
+    add_library(SDL3::SDL3 INTERFACE IMPORTED)
 endif()
 
 add_subdirectory(src)

@@ -95,7 +95,7 @@ namespace {
 		std::string				saveName;
 		std::string				search;
 		bool					showHidden = false;
-		bool					sortByModified = false;
+		int						sortColumn = 0;	// 0=Name, 1=Modified, 2=Size
 		bool					sortAscending = true;
 		bool					needsRefresh = true;
 		std::vector<FallbackEntry> entries;
@@ -238,15 +238,18 @@ namespace {
 			return;
 		}
 
+		// filelist == nullptr means an SDL error.  An empty list or empty
+		// filename means cancel; do not forward it as a user action.
+		if (!filelist[0] || !*filelist[0]) {
+			delete ctx;
+			return;
+		}
+
 		// Remember the selected file's full path so the next time this
 		// dialog opens we can land in the same directory (matching
-		// Windows Altirra's behaviour).  filelist == nullptr means an
-		// SDL error, and an empty list (filelist[0] == nullptr) means
-		// the user cancelled — in both cases leave the saved path alone.
-		if (filelist[0]) {
-			VDStringW selected = VDTextU8ToW(VDStringSpanA(filelist[0]));
-			VDSetLastLoadSavePath(ctx->nKey, selected.c_str());
-		}
+		// Windows Altirra's behaviour).
+		VDStringW selected = VDTextU8ToW(VDStringSpanA(filelist[0]));
+		VDSetLastLoadSavePath(ctx->nKey, selected.c_str());
 
 		if (ctx->userCb)
 			ctx->userCb(ctx->userUd, filelist, filter);
@@ -338,10 +341,15 @@ static void RefreshFallbackEntries(DialogContext& ctx) {
 			if (ad != bd)
 				return ad > bd;
 			int cmp = 0;
-			if (ctx.sortByModified) {
+			if (ctx.sortColumn == 1) {
 				if (a.info.modify_time < b.info.modify_time)
 					cmp = -1;
 				else if (a.info.modify_time > b.info.modify_time)
+					cmp = 1;
+			} else if (ctx.sortColumn == 2) {
+				if (a.info.size < b.info.size)
+					cmp = -1;
+				else if (a.info.size > b.info.size)
 					cmp = 1;
 			}
 			if (!cmp) {
@@ -562,14 +570,14 @@ void ATUIRenderFileDialogFallback() {
 			ImGuiTableColumnFlags_PreferSortDescending
 				| ImGuiTableColumnFlags_WidthFixed, 150.0f);
 		ImGui::TableSetupColumn("Size",
-			ImGuiTableColumnFlags_NoSort
+			ImGuiTableColumnFlags_PreferSortDescending
 				| ImGuiTableColumnFlags_WidthFixed, 90.0f);
 		ImGui::TableHeadersRow();
 
 		if (ImGuiTableSortSpecs *sorts = ImGui::TableGetSortSpecs()) {
 			if (sorts->SpecsDirty && sorts->SpecsCount > 0) {
 				const ImGuiTableColumnSortSpecs& spec = sorts->Specs[0];
-				ctx->sortByModified = spec.ColumnIndex == 1;
+				ctx->sortColumn = spec.ColumnIndex;
 				ctx->sortAscending =
 					spec.SortDirection == ImGuiSortDirection_Ascending;
 				ctx->needsRefresh = true;

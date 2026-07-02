@@ -1,9 +1,13 @@
-# CMake build directory (root level only — not scripts/build/)
+# CMake build directories. Canonical layout is build/<name>; /build-*/ only
+# ignores legacy local scratch trees such as build-lobby or build-libretro.
 /build/
-/build-tests/
-/build-lobby/
+/build-*/
 /build_lobby/
 CMakeUserPresets.json
+
+# source codes of other versions
+Altirra-4.*/*
+Altirra-5.*/*
 
 # Auto-fetched vendor dependencies (created by CMake FetchContent)
 src/AltirraSDL/vendor/

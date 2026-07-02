@@ -375,6 +375,20 @@ inline vduint128::vduint128(const vdint128& x) {
 		return result;
 	}
 	uint64 VDUDiv128x64To64(const vduint128& dividend, uint64 divisor, uint64& remainder);
+#elif defined(_M_ARM64) || defined(_M_ARM64EC)
+	// AltirraSDL: fork addition for the Windows-on-ARM64 build. Upstream
+	// inlines VDUMul64x64To128 only for MSVC x64 (_umul128) and GCC/Clang
+	// (unsigned __int128); MSVC on ARM64 has neither and would fall through to
+	// the out-of-line declaration below, which int128.cpp does not define for
+	// ARM64. __umulh yields the high 64 bits of the unsigned product and plain
+	// '*' the low 64 bits. Preserve when re-syncing from upstream.
+	inline vduint128 VDUMul64x64To128(uint64 x, uint64 y) {
+		vduint128 result;
+		result.q[0] = x * y;
+		result.q[1] = __umulh(x, y);
+		return result;
+	}
+	uint64 VDUDiv128x64To64(const vduint128& dividend, uint64 divisor, uint64& remainder);
 #elif defined(__x86_64__) || defined(__aarch64__)
 	inline vduint128 VDUMul64x64To128(uint64 x, uint64 y) {
 		unsigned __int128 r = (unsigned __int128)(unsigned long long)x * (unsigned long long)y;

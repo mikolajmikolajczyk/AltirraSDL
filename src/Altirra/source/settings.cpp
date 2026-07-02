@@ -48,6 +48,7 @@
 #include "joystick.h"
 #include "settings.h"
 #include "simulator.h"
+#include "mmu.h"
 #include "uiaccessors.h"
 #include "uiconfirm.h"
 #include "uikeyboard.h"
@@ -458,6 +459,7 @@ void ATSettingsExchangeView(bool write, VDRegistryKey& key) {
 	ATSettingsExchangeBool(write, key, "View: Auto-hide menu", ATUIIsMenuAutoHideEnabled, ATUISetMenuAutoHideEnabled);
 	ATSettingsExchangeBool(write, key, "View: Show FPS", ATUIGetShowFPS, ATUISetShowFPS);
 	ATSettingsExchangeBool(write, key, "View: Vertical sync", [&]() { return gtia.IsVsyncEnabled(); }, [&](bool en) { gtia.SetVsyncEnabled(en); });
+	ATSettingsExchangeBool(write, key, "View: Quick bar enabled", ATUIGetQuickBarEnabled, ATUISetQuickBarEnabled);
 
 	if (write)
 		key.setString("View: Alt output name", ATUIGetCurrentAltOutputName());
@@ -822,6 +824,8 @@ void ATSettingsExchangeHardware(bool write, VDRegistryKey& key) {
 		key.setBool("Memory: MapRAM", g_sim.IsMapRAMEnabled());
 		key.setBool("Memory: Ultimate1MB", g_sim.IsUltimate1MBEnabled());
 		key.setBool("Memory: Floating IO bus", g_sim.IsFloatingIoBusEnabled());
+		if (ATMMUEmulator *mmu = g_sim.GetMMU())
+			key.setBool("Memory: BASIC/Self Test latch", mmu->IsBasicSelfTestLatchEnabled());
 		key.setBool("Memory: Preserve extRAM", g_sim.IsPreserveExtRAMEnabled());
 		key.setInt("Memory: Cold start pattern", g_sim.GetMemoryClearMode());
 
@@ -877,6 +881,8 @@ void ATSettingsExchangeHardware(bool write, VDRegistryKey& key) {
 		g_sim.SetMapRAMEnabled(key.getBool("Memory: MapRAM", false));
 		g_sim.SetUltimate1MBEnabled(key.getBool("Memory: Ultimate1MB", false));
 		g_sim.SetFloatingIoBusEnabled(key.getBool("Memory: Floating IO bus", false));
+		if (ATMMUEmulator *mmu = g_sim.GetMMU())
+			mmu->SetBasicSelfTestLatchEnabled(key.getBool("Memory: BASIC/Self Test latch", true));
 		g_sim.SetPreserveExtRAMEnabled(key.getBool("Memory: Preserve extRAM", false));
 		g_sim.SetMemoryClearMode((ATMemoryClearMode)key.getEnumInt("Memory: Cold start pattern", kATMemoryClearModeCount, (int)g_sim.GetMemoryClearMode()));
 
@@ -1623,7 +1629,9 @@ void LoadBaselineSettings() {
 	}
 
 	g_sim.SetBASICEnabled(false);
-	g_sim.SetVideoStandard(kATVideoStandard_NTSC);
+	g_sim.SetVideoStandard(profileId == ATGetDefaultProfileId(kATDefaultProfile_5200)
+		? kATVideoStandard_NTSC
+		: kATVideoStandard_PAL);
 	g_sim.SetCassetteSIOPatchEnabled(true);
 	g_sim.SetCassetteAutoBootEnabled(true);
 	g_sim.SetFPPatchEnabled(false);

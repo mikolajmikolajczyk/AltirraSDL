@@ -108,6 +108,7 @@ static const DeviceCatalogEntry kInternalDevices[] = {
 	{ "warpos",         "APE Warp+ OS 32-in-1", "Allows soft-switching between 32 different OS ROMs." },
 	{ "bit3",           "Bit 3 Full-View 80", "80 column video board for the 800, replaces RAM slot 3." },
 	{ "covox",          "Covox", "Simple DAC for 8-bit digital sound." },
+	{ "pokeymax",       "PokeyMax", "Enhanced audio including Mono/Stereo/Quad POKEY, PSG, SID, Covox, and the Sample DMA Engine." },
 	{ "rapidus",        "Rapidus Accelerator", "6502/65C816 accelerator at 20MHz with 15MB memory and 512KB flash." },
 	{ "soundboard",     "SoundBoard", "Multi-channel wavetable sound with 512K internal memory." },
 	{ "myide-d1xx",     "MyIDE (internal)", "IDE adapter attached to internal port, using the $D1xx address range." },
@@ -408,13 +409,13 @@ void RenderDevicesCategory(ATSimulator &sim) {
 				if (dev.hasFwStatus) {
 					switch (dev.fwStatus) {
 						case ATDeviceFirmwareStatus::OK:
-							ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "OK");
+							ImGui::TextColored(ATUIColorSuccessText(), "OK");
 							break;
 						case ATDeviceFirmwareStatus::Missing:
-							ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "FW Missing");
+							ImGui::TextColored(ATUIColorDangerText(), "FW Missing");
 							break;
 						case ATDeviceFirmwareStatus::Invalid:
-							ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "FW Invalid");
+							ImGui::TextColored(ATUIColorWarningText(), "FW Invalid");
 							break;
 					}
 				} else {
@@ -905,6 +906,11 @@ void RenderUICategory(ATSimulator &) {
 		if (g_ATOptions != prev) { g_ATOptions.mbDirty = true; ATOptionsRunUpdateCallbacks(&prev); ATOptionsSave(); }
 	}
 
+	bool quickBar = ATUIGetQuickBarEnabled();
+	if (ImGui::Checkbox("Enable quick bar", &quickBar))
+		ATUISetQuickBarEnabled(quickBar);
+	ImGui::SetItemTooltip("Show the lower-right quick bar when the mouse is near the lower-right corner.");
+
 	bool single = g_ATOptions.mbSingleInstance;
 	if (ImGui::Checkbox("Reuse program instance", &single)) {
 		ATOptions prev(g_ATOptions);
@@ -1098,8 +1104,8 @@ void RenderSettingsCfgCategory(ATSimulator &) {
 	bool resetting = ATSettingsIsResetPending();
 
 	ImGui::TextWrapped(portable ? "Currently using portable settings (INI file)." : "Currently using standard settings.");
-	if (migrating) ImGui::TextColored(ImVec4(1,1,0,1), "Settings migration scheduled for next startup.");
-	if (resetting) ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Settings reset scheduled for next startup.");
+	if (migrating) ImGui::TextColored(ATUIColorWarningText(), "Settings migration scheduled for next startup.");
+	if (resetting) ImGui::TextColored(ATUIColorDangerText(), "Settings reset scheduled for next startup.");
 
 	ImGui::Spacing();
 	bool disabled = resetting || migrating;
@@ -1181,4 +1187,3 @@ void RenderSettingsCfgCategory(ATSimulator &) {
 		ImGui::EndPopup();
 	}
 }
-

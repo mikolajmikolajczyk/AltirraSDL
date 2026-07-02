@@ -45,3 +45,9 @@ option(ALTIRRA_EMBED "Build the headless AltirraEmbed wasm core for JS embedding
 if(ALTIRRA_EMBED AND ALTIRRA_SDL3 AND NOT ANDROID)
     add_subdirectory(AltirraEmbed)
 endif()
+
+# RetroArch/libretro core. This target is intentionally independent of the
+# SDL3 frontend; it has its own adapter sources under AltirraLibretro.
+if(ALTIRRA_LIBRETRO)
+    add_subdirectory(AltirraLibretro)
+endif()

@@ -100,6 +100,18 @@
     <ClCompile Include="source\covox.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="source\pokeymax.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\pokeymaxsample.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\pokeymaxsid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="source\ympsg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="source\cpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1167,6 +1179,15 @@
     <ClInclude Include="h\covox.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="h\ympsg.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="h\pokeymaxsample.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="h\pokeymaxsid.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="h\cpu.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -2024,6 +2045,9 @@
     <None Include="res\printer-1029-retract.pcm" />
     <None Include="res\printer-1029-home.pcm" />
     <None Include="res\printer-1025-feed.pcm" />
+    <None Include="h\uicommandiconinfo.inl">
+      <Filter>Header Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="res\Altirra.rc">

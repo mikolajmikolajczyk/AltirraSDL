@@ -18,13 +18,20 @@
 #include "testmode_ipc.h"
 #include "ui_testmode.h"
 #include "ui_main.h"
+#include "uiaccessors.h"
 #include "ui_frame_capture.h"
+#include "ui_mode.h"
+#include "ui/mobile/ui_mobile.h"
 #include "simulator.h"
 #include "gtia.h"
 #include "oshelper.h"
+#include "inputmanager.h"
+#include "inputdefs.h"
+#include "netplay/netplay_input.h"
 #include "logging.h"
 
 bool g_testModeEnabled = false;
+extern ATMobileUIState g_mobileState;
 
 // =========================================================================
 // IPC transport (cross-platform wrapper)
@@ -34,12 +41,23 @@ static TestModeIPC g_ipc;
 static std::string g_ipcAddress;   // socket path or pipe name (for display)
 static std::string g_recvBuf;      // accumulates partial reads
 static std::string g_sendBuf;      // accumulates responses to flush
+static std::vector<std::string> g_scriptLines;
+static size_t g_scriptLineNext = 0;
+static FILE *g_scriptOutput = nullptr;
+static bool g_hasMouseOverride = false;
+static ImVec2 g_mouseOverride {};
 
 static void SendResponse(const std::string &json) {
-	if (!g_ipc.HasClient())
-		return;
-	g_sendBuf += json;
-	g_sendBuf += '\n';
+	if (g_scriptOutput) {
+		fputs(json.c_str(), g_scriptOutput);
+		fputc('\n', g_scriptOutput);
+		fflush(g_scriptOutput);
+	}
+
+	if (g_ipc.HasClient()) {
+		g_sendBuf += json;
+		g_sendBuf += '\n';
+	}
 }
 
 // Forward declarations for cleanup (defined further down)
@@ -71,6 +89,7 @@ struct TestItem {
 	std::string label;
 	std::string windowName;
 	ImGuiItemStatusFlags flags;
+	ImGuiItemFlags itemFlags;
 };
 
 static std::vector<TestItem> g_items;
@@ -90,6 +109,7 @@ static const char* GetCurrentWindowName(ImGuiContext *ctx) {
 enum class PendingActionType {
 	None,
 	Click,          // click at a position (mouse down + up)
+	MouseMove,      // move pointer to a fixed position
 	WaitFrames,     // wait N frames before responding
 };
 
@@ -112,7 +132,28 @@ static void ResetClientState() {
 	g_recvBuf.clear();
 	g_sendBuf.clear();
 	g_pendingActions.clear();
+	g_hasMouseOverride = false;
 	g_commandsBlocked = false;
+}
+
+static bool LoadScriptFile(const char *path) {
+	FILE *f = fopen(path, "rb");
+	if (!f) {
+		LOG_ERROR("TestMode", "failed to open script '%s'", path);
+		return false;
+	}
+
+	char buf[4096];
+	while (fgets(buf, sizeof buf, f)) {
+		std::string line(buf);
+		while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+			line.pop_back();
+		g_scriptLines.push_back(std::move(line));
+	}
+
+	fclose(f);
+	g_scriptLineNext = 0;
+	return true;
 }
 
 // =========================================================================
@@ -326,6 +367,9 @@ static std::string BuildItemListJson(const std::string &windowFilter) {
 			json += ",\"type\":\"button\"";
 		}
 
+		json += ",\"disabled\":";
+		json += (item.itemFlags & ImGuiItemFlags_Disabled) ? "true" : "false";
+
 		json += ",\"x\":";
 		json += std::to_string((int)item.rect.Min.x);
 		json += ",\"y\":";
@@ -415,6 +459,31 @@ static std::string DispatchCommand(std::string cmd, ATSimulator &sim, ATUIState 
 		return JsonOk();
 	}
 
+	if (verb == "system_config_category") {
+		std::string categoryStr = NextToken(cmd);
+		if (categoryStr.empty())
+			return JsonError("usage: system_config_category <index>");
+
+		state.showSystemConfig = true;
+		state.systemConfigCategory = atoi(categoryStr.c_str());
+		return JsonOk();
+	}
+
+	if (verb == "mobile_hamburger") {
+		ATUISetMode(ATUIMode::Gaming);
+		ATUIApplyModeStyle(1.0f);
+		g_mobileState.gameLoaded = true;
+		g_mobileState.currentScreen = ATMobileUIScreen::HamburgerMenu;
+		return JsonOk();
+	}
+
+	if (verb == "mobile_exit_confirm") {
+		ATUISetMode(ATUIMode::Gaming);
+		ATUIApplyModeStyle(1.0f);
+		ATMobileUI_ShowExitEmulatorConfirm(sim, state, g_mobileState);
+		return JsonOk();
+	}
+
 	if (verb == "list_dialogs") {
 		std::string json = "{\"ok\":true,\"dialogs\":[";
 		bool first = true;
@@ -458,6 +527,19 @@ static std::string DispatchCommand(std::string cmd, ATSimulator &sim, ATUIState 
 		return JsonOk();
 	}
 
+	if (verb == "mouse_move") {
+		std::string xStr = NextToken(cmd);
+		std::string yStr = NextToken(cmd);
+		if (xStr.empty() || yStr.empty())
+			return JsonError("usage: mouse_move <x> <y>");
+
+		PendingAction action;
+		action.type = PendingActionType::MouseMove;
+		action.clickPos = ImVec2((float)atof(xStr.c_str()), (float)atof(yStr.c_str()));
+		g_pendingActions.push_back(action);
+		return JsonOk();
+	}
+
 	if (verb == "wait_frames") {
 		std::string countStr = NextToken(cmd);
 		int count = countStr.empty() ? 1 : std::max(1, atoi(countStr.c_str()));
@@ -493,6 +575,188 @@ static std::string DispatchCommand(std::string cmd, ATSimulator &sim, ATUIState 
 		return "{\"ok\":true,\"path\":\"" + JsonEscape(path) + "\"}";
 	}
 
+	// --- Memory inspection (read-only, side-effect-free) ---
+	// Reads bytes via ATSimulator::DebugReadByte so I/O reads do not
+	// trigger side effects (collision-clear, IRQ ack, etc).  Useful for
+	// dynamic analysis of disassembled software: dump zero-page,
+	// inspect object arrays, verify hypotheses about register usage.
+	//
+	// Format:  mem_read <hex_addr> [<count>]
+	// Default count = 1.  Max count = 4096 (one response packet).
+	// Response: {"ok":true,"addr":"$xxxx","bytes":[h0,h1,...]}
+	if (verb == "mem_read") {
+		std::string addrStr  = NextToken(cmd);
+		std::string countStr = NextToken(cmd);
+		if (addrStr.empty())
+			return JsonError("usage: mem_read <hex_addr> [<count>]");
+
+		// Reject unparseable input loudly.  A debugging verb that
+		// silently falls back to reading $0000 on a typo would hand the
+		// caller wrong-but-plausible data — worse than any error.
+		char *end = nullptr;
+		uint32 addr = (uint32)strtoul(addrStr.c_str(), &end, 16);
+		if (end == addrStr.c_str() || *end)
+			return JsonError("bad hex address: " + addrStr);
+
+		uint32 count = 1;
+		if (!countStr.empty()) {
+			count = (uint32)strtoul(countStr.c_str(), &end, 0);
+			if (end == countStr.c_str() || *end)
+				return JsonError("bad count: " + countStr);
+		}
+		if (count == 0) count = 1;
+		if (count > 4096) count = 4096;
+		std::string body = "{\"ok\":true,\"addr\":\"$";
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%04X", addr & 0xFFFF);
+		body += buf;
+		body += "\",\"bytes\":[";
+		for (uint32 i = 0; i < count; ++i) {
+			uint8 b = sim.DebugReadByte((uint16)((addr + i) & 0xFFFF));
+			snprintf(buf, sizeof(buf), "%s%u", i ? "," : "", (unsigned)b);
+			body += buf;
+		}
+		body += "]}";
+		return body;
+	}
+
+	// --- Controller input ---
+	//
+	// Format:  input joy <unit> <action>
+	//          input console <button> [up]
+	//
+	// joy actions:   left | right | up | down | fire | release_all
+	// console btns:  start | select | option
+	//                ("up" suffix releases the switch; default = press)
+	//
+	// <unit> is the input-map controller unit (0 = first/default
+	// controller); which console port it drives is decided by the
+	// active input map, exactly as for a physical game controller.
+	//
+	// Joystick state is sticky — a press is held until release_all.
+	// Directions on one axis are exclusive: pressing left releases
+	// right and vice versa (same for up/down), because a physical
+	// stick cannot hold both and ATInputManager does no such
+	// exclusion itself.  The caller (test script) owns press/release
+	// scheduling so frame timing stays deterministic.
+	if (verb == "input") {
+		std::string sub = NextToken(cmd);
+
+		if (sub == "joy") {
+			std::string unitStr = NextToken(cmd);
+			std::string action  = NextToken(cmd);
+			if (unitStr.empty() || action.empty())
+				return JsonError("usage: input joy <unit> <action>");
+			int unit = atoi(unitStr.c_str());
+			if (unit < 0 || unit > 3)
+				return JsonError("unit must be 0..3");
+			ATInputManager *im = sim.GetInputManager();
+			if (!im)
+				return JsonError("no input manager");
+
+			if (action == "release_all") {
+				im->OnButtonUp(unit, kATInputCode_JoyStick1Left);
+				im->OnButtonUp(unit, kATInputCode_JoyStick1Right);
+				im->OnButtonUp(unit, kATInputCode_JoyStick1Up);
+				im->OnButtonUp(unit, kATInputCode_JoyStick1Down);
+				im->OnButtonUp(unit, kATInputCode_JoyButton0);
+				return JsonOk();
+			}
+
+			int code = -1;
+			int opposite = -1;
+			if (action == "left") {
+				code = kATInputCode_JoyStick1Left;
+				opposite = kATInputCode_JoyStick1Right;
+			} else if (action == "right") {
+				code = kATInputCode_JoyStick1Right;
+				opposite = kATInputCode_JoyStick1Left;
+			} else if (action == "up") {
+				code = kATInputCode_JoyStick1Up;
+				opposite = kATInputCode_JoyStick1Down;
+			} else if (action == "down") {
+				code = kATInputCode_JoyStick1Down;
+				opposite = kATInputCode_JoyStick1Up;
+			} else if (action == "fire") {
+				code = kATInputCode_JoyButton0;
+			} else
+				return JsonError("unknown joy action: " + action);
+
+			// Enforce per-axis exclusivity (see header comment): a
+			// physical stick cannot hold left+right or up+down, and
+			// some games misbehave on the impossible state.
+			if (opposite >= 0)
+				im->OnButtonUp(unit, opposite);
+			im->OnButtonDown(unit, code);
+			return JsonOk();
+		}
+
+		if (sub == "console") {
+			std::string button = NextToken(cmd);
+			std::string state  = NextToken(cmd);   // optional "up"
+			if (button.empty())
+				return JsonError("usage: input console <start|select|option> [up]");
+
+			uint8 bit = 0;
+			if      (button == "start")  bit = 0x01;
+			else if (button == "select") bit = 0x02;
+			else if (button == "option") bit = 0x04;
+			else
+				return JsonError("unknown console button: " + button);
+
+			ATGTIAEmulator &gtia = sim.GetGTIA();
+			ATNetplayInput::RouteConsoleSwitch(&gtia, bit, state != "up");
+			return JsonOk();
+		}
+
+		return JsonError(
+			"usage: input joy <unit> <left|right|up|down|fire|release_all>"
+			" | input console <start|select|option> [up]"
+		);
+	}
+
+	// --- Speed control ---
+	//
+	// Format:  set_speed <turbo|warp|normal|real>
+	//          get_speed
+	//
+	// `turbo` / `warp` enable the sticky turbo mode (== Tab key in
+	// the GUI) so the simulator runs as fast as the host CPU allows.
+	// `normal` / `real` clear it so the simulator runs at its native
+	// ~60 Hz NTSC (or 50 Hz PAL) rate.
+	//
+	// Test-mode defaults to whatever the user's settings.ini specified
+	// (typically normal speed); use this verb at the start of a
+	// capture session if you need to override.
+	//
+	// Interaction with wait_frames: wait_frames counts RENDERED frames
+	// (decremented in ATTestModePostRender), and the turbo frame-skip
+	// renders only 1 of every engine.turbo_fps_divisor (default 16)
+	// emulated frames — so `wait_frames N` under turbo spans roughly
+	// N*divisor emulated frames.  Scripts that count emulated frames
+	// should stay at normal speed or divide accordingly.
+	if (verb == "set_speed") {
+		std::string mode = NextToken(cmd);
+		if (mode.empty())
+			return JsonError("usage: set_speed <turbo|warp|normal|real>");
+		if (mode == "turbo" || mode == "warp") {
+			ATUISetTurbo(true);
+			return JsonOk();
+		}
+		if (mode == "normal" || mode == "real") {
+			ATUISetTurbo(false);
+			return JsonOk();
+		}
+		return JsonError("unknown speed mode: " + mode);
+	}
+
+	if (verb == "get_speed") {
+		std::string body = "{\"ok\":true,\"turbo\":";
+		body += ATUIGetTurbo() ? "true" : "false";
+		body += "}";
+		return body;
+	}
+
 	// --- Emulation control ---
 	if (verb == "cold_reset") {
 		sim.ColdReset();
@@ -513,6 +777,23 @@ static std::string DispatchCommand(std::string cmd, ATSimulator &sim, ATUIState 
 
 	if (verb == "resume") {
 		sim.Resume();
+		return JsonOk();
+	}
+
+	if (verb == "quit") {
+		state.exitConfirmed = true;
+		SDL_Event q {};
+		q.type = SDL_EVENT_QUIT;
+		SDL_PushEvent(&q);
+		return JsonOk();
+	}
+
+	if (verb == "run_command") {
+		std::string command = RestOfLine(cmd);
+		if (command.empty())
+			return JsonError("usage: run_command <command>");
+
+		ATUIExecuteCommandStringAndShowErrors(command.c_str(), nullptr);
 		return JsonOk();
 	}
 
@@ -560,13 +841,24 @@ static std::string DispatchCommand(std::string cmd, ATSimulator &sim, ATUIState 
 			"\"list_dialogs\","
 			"\"open_dialog <name>\","
 			"\"close_dialog <name>\","
+			"\"system_config_category <index>\","
+			"\"mobile_hamburger\","
+			"\"mobile_exit_confirm\","
 			"\"click <window> <label>\","
+			"\"mouse_move <x> <y>\","
 			"\"wait_frames [n]\","
 			"\"screenshot <path>\","
+			"\"mem_read <hex_addr> [<count>]\","
+			"\"input joy <unit> <left|right|up|down|fire|release_all>\","
+			"\"input console <start|select|option> [up]\","
+			"\"set_speed <turbo|warp|normal|real>\","
+			"\"get_speed\","
 			"\"cold_reset\","
 			"\"warm_reset\","
 			"\"pause\","
 			"\"resume\","
+			"\"quit\","
+			"\"run_command <command>\","
 			"\"boot_image <path>\","
 			"\"attach_disk <drive> <path>\","
 			"\"load_state <path>\","
@@ -597,6 +889,20 @@ static void ProcessPendingActions() {
 				continue;
 			}
 			++i;
+			continue;
+		}
+
+		if (action.type == PendingActionType::MouseMove) {
+			if (mouseUsedThisFrame) {
+				++i;
+				continue;
+			}
+
+			mouseUsedThisFrame = true;
+			g_hasMouseOverride = true;
+			g_mouseOverride = action.clickPos;
+			io.AddMousePosEvent(action.clickPos.x, action.clickPos.y);
+			g_pendingActions.erase(g_pendingActions.begin() + i);
 			continue;
 		}
 
@@ -688,9 +994,28 @@ bool ATTestModeInit() {
 	if (!g_testModeEnabled)
 		return true;
 
-	g_ipcAddress = g_ipc.Init();
-	if (g_ipcAddress.empty())
-		return false;
+	const char *scriptPath = SDL_getenv("ALTIRRA_TESTMODE_SCRIPT");
+	const char *outputPath = SDL_getenv("ALTIRRA_TESTMODE_OUTPUT");
+	if (scriptPath && *scriptPath) {
+		if (!LoadScriptFile(scriptPath))
+			return false;
+
+		if (outputPath && *outputPath) {
+			g_scriptOutput = fopen(outputPath, "wb");
+			if (!g_scriptOutput) {
+				LOG_ERROR("TestMode", "failed to open script output '%s'", outputPath);
+				return false;
+			}
+		}
+	}
+
+	if (g_scriptLines.empty()) {
+		g_ipcAddress = g_ipc.Init();
+		if (g_ipcAddress.empty())
+			return false;
+	} else {
+		g_ipcAddress.clear();
+	}
 
 	// Enable ImGui test engine hooks
 	ImGuiContext &g = *ImGui::GetCurrentContext();
@@ -699,7 +1024,10 @@ bool ATTestModeInit() {
 	// Register NewFrame hook to clear item registry each frame
 	EnsureHookRegistered();
 
-	LOG_INFO("TestMode", "Initialized (PID %lu)", (unsigned long)SDL_GetCurrentThreadID());
+	if (!g_ipcAddress.empty())
+		LOG_INFO("TestMode", "Initialized (PID %lu)", (unsigned long)SDL_GetCurrentThreadID());
+	else
+		LOG_INFO("TestMode", "Initialized with script transport only");
 	return true;
 }
 
@@ -714,6 +1042,12 @@ void ATTestModeShutdown() {
 
 	g_ipc.Shutdown();
 	g_ipcAddress.clear();
+	if (g_scriptOutput) {
+		fclose(g_scriptOutput);
+		g_scriptOutput = nullptr;
+	}
+	g_scriptLines.clear();
+	g_scriptLineNext = 0;
 	g_items.clear();
 	ResetClientState();
 	LOG_INFO("TestMode", "Shutdown");
@@ -723,24 +1057,37 @@ void ATTestModePollCommands(ATSimulator &sim, ATUIState &state) {
 	if (!g_testModeEnabled)
 		return;
 
-	g_ipc.TryAccept();
+	if (!g_ipcAddress.empty())
+		g_ipc.TryAccept();
 
-	if (!g_ipc.HasClient())
+	if (!g_ipc.HasClient() && g_scriptLineNext >= g_scriptLines.size())
 		return;
 
 	// Read available data
-	char buf[4096];
-	int n = g_ipc.Recv(buf, sizeof(buf));
-	if (n > 0) {
-		g_recvBuf.append(buf, n);
-	} else if (n < 0) {
-		// Client disconnected or error
-		LOG_INFO("TestMode", "Client disconnected");
-		g_ipc.DisconnectClient();
-		ResetClientState();
-		return;
+	if (g_ipc.HasClient()) {
+		char buf[4096];
+		int n = g_ipc.Recv(buf, sizeof(buf));
+		if (n > 0) {
+			g_recvBuf.append(buf, n);
+		} else if (n < 0) {
+			// Client disconnected or error
+			LOG_INFO("TestMode", "Client disconnected");
+			g_ipc.DisconnectClient();
+			ResetClientState();
+			return;
+		}
+		// n == 0: no data available (would block)
 	}
-	// n == 0: no data available (would block)
+
+	while (!g_commandsBlocked && g_scriptLineNext < g_scriptLines.size()) {
+		std::string line = g_scriptLines[g_scriptLineNext++];
+		if (line.empty() || line[0] == '#')
+			continue;
+
+		std::string response = DispatchCommand(line, sim, state);
+		if (!response.empty())
+			SendResponse(response);
+	}
 
 	// Process complete lines — stop if a blocking command (wait_frames) is active
 	size_t pos;
@@ -772,6 +1119,14 @@ void ATTestModePostRender(ATSimulator &sim, ATUIState &state) {
 	FlushSendBuffer();
 }
 
+bool ATTestModeGetMousePosOverride(ImVec2& pos) {
+	if (!g_testModeEnabled || !g_hasMouseOverride)
+		return false;
+
+	pos = g_mouseOverride;
+	return true;
+}
+
 // =========================================================================
 // ImGui Test Engine Hook Implementations
 // =========================================================================
@@ -789,6 +1144,7 @@ void ImGuiTestEngineHook_ItemAdd(ImGuiContext *ctx, ImGuiID id, const ImRect &bb
 	item.rect = bb;
 	item.windowName = GetCurrentWindowName(ctx);
 	item.flags = item_data ? item_data->StatusFlags : ImGuiItemStatusFlags_None;
+	item.itemFlags = item_data ? item_data->ItemFlags : ImGuiItemFlags_None;
 	g_items.push_back(std::move(item));
 }
 
