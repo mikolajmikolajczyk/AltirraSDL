@@ -51,6 +51,12 @@ public:
 
     void sendKey(int keyCode, int charCode, bool isDown, int modifiers);
 
+    // Inject digital joystick state for a port (0..3). `dirMask` is a 4-bit
+    // set: bit0=up, bit1=down, bit2=left, bit3=right (1 = pressed); it drives
+    // the PIA direction lines that back STICK0..3. `fire` holds the trigger
+    // (STRIG). Idempotent — the host calls it whenever the held keys change.
+    void setJoystick(int port, int dirMask, bool fire);
+
     // Capture GTIA's last posted frame into mPixels (XRGB8888, tightly
     // packed at kDisplayWidth × kDisplayHeight). Returns true when a frame
     // was available.
@@ -80,6 +86,12 @@ private:
     std::vector<uint32_t>      mDebugBpIds;
     VDPixmapBuffer             mXrgbBuf;
     bool mPixelsCached = false;
+
+    // Joystick injection: one PIA input slot shared by all four ports (lazily
+    // allocated), plus each port's held 4-bit direction so a change on one
+    // port keeps the others. See setJoystick().
+    int     mJoyPiaSlot = -1;
+    uint8_t mJoyDir[4] = { 0, 0, 0, 0 };
 
     // 6502 PC walks through operand bytes mid-instruction (a 3-byte JMP at
     // $2017 shows PC=$2018, $2019, $201A before resetting back to $2017).

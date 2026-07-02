@@ -33,6 +33,7 @@ int altirra_embed_bindings_marker() { return 0; }
 
 #include "simulator.h"
 #include "gtia.h"
+#include "pia.h"
 #include "cpu.h"
 #include "mediamanager.h"
 #include <at/ataudio/pokey.h>
@@ -190,6 +191,30 @@ void AltirraCore::sendKey(int keyCode, int charCode, bool isDown, int modifiers)
     pokey.PushKey(kbcode, false, true, false, true);
 }
 
+// --- Joystick ---
+
+void AltirraCore::setJoystick(int port, int dirMask, bool fire) {
+    if (port < 0 || port > 3) return;
+
+    // One PIA input slot backs all four ports; allocate on first use.
+    if (mJoyPiaSlot < 0)
+        mJoyPiaSlot = g_sim.GetPIA().AllocInput();
+
+    mJoyDir[port] = (uint8_t)(dirMask & 0x0F);
+
+    // Pack each port's 4 direction bits into the 16-bit PIA input value:
+    // port N occupies bits (N*4)..(N*4+3) — ports 0/1 → SWCHA, 2/3 → SWCHB
+    // (formula from src/Altirra/source/portmanager.cpp). Direction lines are
+    // active-low, so the register value CLEARS the pressed bits and leaves
+    // the rest set (mask 0xFFFF) to not fight other input sources at idle.
+    uint32_t pressed = 0;
+    for (int p = 0; p < 4; ++p)
+        pressed |= ((uint32_t)mJoyDir[p] & 0x0F) << (p * 4);
+    g_sim.GetPIA().SetInputBits(mJoyPiaSlot, ~pressed, 0xFFFF);
+
+    g_sim.GetGTIA().SetControllerTrigger(port, fire);
+}
+
 // --- Pixels + audio ---
 
 bool AltirraCore::capturePixels() {
@@ -263,6 +288,7 @@ EMSCRIPTEN_BINDINGS(altirra_core) {
         .function("isAtInstrBoundary", &AltirraCore::isAtInstrBoundary)
         .function("readMem",           &AltirraCore::readMem)
         .function("sendKey",           &AltirraCore::sendKey)
+        .function("setJoystick",       &AltirraCore::setJoystick)
         .function("pixels",            &AltirraCore::pixels)
         .function("getAudioSamples",   &AltirraCore::getAudioSamples)
         .function("saveState",         &AltirraCore::saveState)
